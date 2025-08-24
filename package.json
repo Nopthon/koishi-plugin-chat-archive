@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chat-archive",
   "description": "[UNFINISHED] Archive QQ-group menbers' awesome messages, revisiting someday ^o^",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [

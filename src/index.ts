@@ -10,7 +10,8 @@ export interface Config {
   delchatAuth: number
   resetchatAuth: number
   listchatAuth: number
-  listchatPageSize: number
+  findchatAuth: number
+  chatPageSize: number
   useForwardMsg: boolean
 
 }
@@ -19,7 +20,7 @@ export const Config: Schema<Config> = Schema.object({
   ' ': Schema.never().description(`
 ## 这里是 Chat-Archive 插件使用说明：
 
-### 这个插件可以储存群u的精彩发言，并且支持查询/随机发送等操作
+### 这个插件可以储存群u的发言，并且支持查询/随机发送等操作
 
 （欢迎提 Issue，应该会关注...吧）
 
@@ -52,7 +53,8 @@ export const Config: Schema<Config> = Schema.object({
   delchatAuth: Schema.natural().default(2).description('delchat 指令的权限等级'),
   resetchatAuth: Schema.natural().default(2).description('resetchat 指令的权限等级'),
   listchatAuth: Schema.natural().default(1).description('listchat 指令的权限等级'),
-  listchatPageSize: Schema.natural().default(7).description('listchat -p 命令每页显示的记录数量'),
+  findchatAuth: Schema.natural().default(1).description('findchat 指令的权限等级'),
+  chatPageSize: Schema.natural().default(7).description('-p 参数每页显示的消息数量'),
 
 })
 
@@ -99,7 +101,7 @@ export function apply(ctx: Context, config: Config) {
         return '你知道的，这是群聊指令，为什么要私聊使用呢？'
       }
 
-      const records = await ctx.database.get('chat_archive', { groupId: session.guildId }) 
+      const records = await ctx.database.get('chat_archive', { groupId: session.guildId })
       if (!records.length) {
         return '当前群聊还没有存储任何的聊天记录'
       }
@@ -298,12 +300,12 @@ export function apply(ctx: Context, config: Config) {
 
       if (options.page) {
         // -p：查询页码
-        const pageNum = options.page
+        const pageNum = options.page || 1
         if (pageNum < 1) {
           return '页码必须大于0 :('
         }
 
-        const pageSize = config.listchatPageSize
+        const pageSize = config.chatPageSize
         const totalPages = Math.ceil(totalCount / pageSize)
 
         if (pageNum > totalPages) {
@@ -316,11 +318,74 @@ export function apply(ctx: Context, config: Config) {
         const output = pageInfo.map(record => {
           const date = record.timestamp
           const fDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
-          return `#${record.id} [${fDate}] ${record.senderName}: ${record.content}`
+          return `#${record.id} [${fDate}] ${record.senderName}: \n${record.content}\n`
         })
 
-        output.unshift(`第 ${pageNum}/${totalPages} 页, 共: ${totalCount} 条记录:`)
+        output.unshift(`第 ${pageNum}/${totalPages} 页, 共${totalCount}条记录`)
         return output.join('\n')
       }
+    })
+
+  // findchat 命令
+  ctx.command('findchat <keywords:text>')
+    .userFields(['authority'])
+    .option('page', '-p <page:number> 查询指定页码')
+    .action(async ({ session, options }, keywords) => {
+      // 检查权限
+      if (session.user.authority < config.findchatAuth) {
+        return '你没有权限执行此操作'
+      }
+
+      if (!session?.guildId) {
+        return '你知道的，这是群聊指令，为什么要私聊使用呢？'
+      }
+
+      if (!keywords) {
+        return '请输入要搜索的关键词，多个关键词用空格分隔'
+      }
+
+      const kwList = keywords.split(/\s+/).filter(k => k.trim().length > 0)
+
+      if (kwList.length === 0) {
+        return '不知道你输入了什么 :('
+      }
+      const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
+      const fRecords = allRecords.filter(record => {
+        const content = record.content.toLowerCase()
+        return kwList.every(keyword => content.includes(keyword.toLowerCase()))
+      })
+
+      const totalCount = fRecords.length
+
+      if (totalCount === 0) {
+        const keywordStr = kwList.map(k => `"${k}"`).join(' 和 ')
+        return `没有找到同时包含 ${keywordStr} 的聊天记录`
+      }
+
+      const sRecords = fRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+
+      const pageNum = options.page || 1
+      if (pageNum < 1) {
+        return '页码必须大于0 :('
+      }
+
+      const pageSize = config.chatPageSize
+      const totalPages = Math.ceil(totalCount / pageSize)
+
+      if (pageNum > totalPages) {
+        const keywordStr = kwList.map(k => `"${k}"`).join(' 和 ')
+        return `搜索 ${keywordStr} 的结果总共只有 ${totalPages} 页`
+      }
+
+      const offset = (pageNum - 1) * pageSize
+      const pageInfo = sRecords.slice(offset, offset + pageSize)
+
+      const output = pageInfo.map(record => {
+        const date = record.timestamp
+        const fDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
+        return `#${record.id} [${fDate}] ${record.senderName}: \n${record.content}\n`
+      })
+      output.unshift(`第 ${pageNum}/${totalPages} 页, 共找到${totalCount}条记录:`)
+      return output.join('\n')
     })
 }
