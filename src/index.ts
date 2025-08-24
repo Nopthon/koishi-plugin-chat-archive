@@ -31,25 +31,15 @@ export const Config: Schema<Config> = Schema.object({
 - **listchat**: 查看存档消息，-p 参数指定页码查找；-s 参数指定特定编号查找
 - **delchat**: 删除聊天存档中的单条指定消息
 - **resetchat**: 清空单个群聊（--this）/ 所有群聊（--all）的聊天存档
+- **findchat**: 对存档进行关键词查询，多个关键词之间用空格分隔，不区分大小写
 
-### 插件目前的问题 / TODO：
-
-- **不能合并转发（这个我不会）**
-
-- 在储存图片时，目前直接获取的是qq的临时地址，在一定时间后过期，导致信息无法发送，目前考虑：
-    1. 直接删除图片内容   2. 建立本地文件夹   3. 用户手动设置一个图床地址
-    
-- 增加关键词搜索（编号搜索是个什么玩意）
-
-> [!caution]
-> 
-> 插件处于“开发中”状态，可能会有意想不到的 bug 产生
+### 插件目前处于“开发中”状态，可能会有意想不到的 bug 产生
 
   `),
   useGroupNickname: Schema.boolean().default(true).description('savechat时储存消息发送者的名字使用（关：QQ名称 开：群昵称）'),
   savechatAuth: Schema.natural().default(1).description('savechat 指令的权限等级'),
   rollchatAuth: Schema.natural().default(1).description('rollchat 指令的权限等级'),
-  useForwardMsg: Schema.boolean().default(false).description(`【尚未实现】rollchat 是否使用合并转发方式输出（关：文本输出 开：转发输出）`),
+  useForwardMsg: Schema.boolean().default(false).description(`【尚未实现】是否使用合并转发方式输出（关：文本输出 开：转发输出）`),
   delchatAuth: Schema.natural().default(2).description('delchat 指令的权限等级'),
   resetchatAuth: Schema.natural().default(2).description('resetchat 指令的权限等级'),
   listchatAuth: Schema.natural().default(1).description('listchat 指令的权限等级'),
@@ -191,7 +181,7 @@ export function apply(ctx: Context, config: Config) {
         return '你知道的，这是群聊指令，为什么要私聊使用呢？'
       }
 
-      if (!id) {
+      if (!id) {``
         return '你需要提供一个整数参数作为需要删除的消息的 id'
       }
 
@@ -201,7 +191,7 @@ export function apply(ctx: Context, config: Config) {
       }
 
       await ctx.database.remove('chat_archive', { id })
-      return `已删除 #${id} 的消息记录`
+      return `已删除 #${id} 消息记录`
     })
 
 
@@ -318,7 +308,7 @@ export function apply(ctx: Context, config: Config) {
         const output = pageInfo.map(record => {
           const date = record.timestamp
           const fDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
-          return `#${record.id} [${fDate}] ${record.senderName}: \n${record.content}\n`
+          return `#${record.id} [${fDate}] ${record.senderName}: \n ${record.content}\n`
         })
 
         output.unshift(`第 ${pageNum}/${totalPages} 页, 共${totalCount}条记录`)
@@ -341,7 +331,7 @@ export function apply(ctx: Context, config: Config) {
       }
 
       if (!keywords) {
-        return '请输入要搜索的关键词，多个关键词用空格分隔'
+        return '请输入 findchat + 要搜索的关键词，多个关键词用空格分隔'
       }
 
       const kwList = keywords.split(/\s+/).filter(k => k.trim().length > 0)
@@ -373,8 +363,7 @@ export function apply(ctx: Context, config: Config) {
       const totalPages = Math.ceil(totalCount / pageSize)
 
       if (pageNum > totalPages) {
-        const keywordStr = kwList.map(k => `"${k}"`).join(' 和 ')
-        return `搜索 ${keywordStr} 的结果总共只有 ${totalPages} 页`
+        return `当前总共只有 ${totalPages} 页聊天记录`
       }
 
       const offset = (pageNum - 1) * pageSize
@@ -383,9 +372,9 @@ export function apply(ctx: Context, config: Config) {
       const output = pageInfo.map(record => {
         const date = record.timestamp
         const fDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
-        return `#${record.id} [${fDate}] ${record.senderName}: \n${record.content}\n`
+        return `#${record.id} [${fDate}] ${record.senderName}: \n ${record.content}\n`
       })
-      output.unshift(`第 ${pageNum}/${totalPages} 页, 共找到${totalCount}条记录:`)
+      output.unshift(`第 ${pageNum}/${totalPages} 页, 共找到${totalCount}条记录`)
       return output.join('\n')
     })
 }
