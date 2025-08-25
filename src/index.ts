@@ -35,6 +35,7 @@ export const Config: Schema<Config> = Schema.object({
 
 ### 插件目前处于“开发中”状态，可能会有意想不到的 bug 产生
 
+
   `),
   useGroupNickname: Schema.boolean().default(true).description('savechat时储存消息发送者的名字使用（关：QQ名称 开：群昵称）'),
   savechatAuth: Schema.natural().default(1).description('savechat 指令的权限等级'),
@@ -65,6 +66,71 @@ declare module 'koishi' {
   }
 }
 
+
+// 权限检查函数
+// 我终于知道要把重复使用的指令封装一下了
+function checkSth(session: any, _Auth: number): string | null {
+  if (session.user.authority < _Auth) {
+    return '你没有权限执行此操作'
+  }
+
+  if (!session?.guildId) {
+    return '你知道的，这是群聊指令，为什么要私聊使用呢？'
+  }
+
+  return null
+}
+
+// 日期格式化函数，为了可读性把那一坨参数拆开来了，好让你知道 isShort 参数的作用
+function formatDate(date: Date, isShort: boolean = false): string {
+  const month = (date.getMonth() + 1).toString().padStart(2, '0')
+  const day = date.getDate().toString().padStart(2, '0')
+  const hours = date.getHours().toString().padStart(2, '0')
+  const minutes = date.getMinutes().toString().padStart(2, '0')
+
+  if (isShort) {
+    return `${month}-${day} ${hours}:${minutes}`
+  } else {
+    const seconds = date.getSeconds().toString().padStart(2, '0')
+    const year = date.getFullYear()
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+  }
+}
+
+// 单条消息输出函数
+function fSigMessage(record: msg, useForwardMsg: boolean = false): string | segment {
+  const date = record.timestamp
+  const fDate = formatDate(date, false)
+
+  if (useForwardMsg) {
+    const senderInfo = {
+      userId: record.senderId,
+      nickname: record.senderName,
+    }
+    const content = [
+      `[${fDate}] ${record.senderName}:\n`,
+      ...segment.parse(record.content)
+    ]
+    const forwardNode = segment("message", senderInfo, content)
+    return segment("message", { forward: true }, [forwardNode])
+  } else {
+    return `[${fDate}] ${record.senderName}:\n${record.content}`
+  }
+}
+
+// 多条消息输出函数
+// TODO: 加上合并转发，在我意识到怎么构造合并转发信息之后
+function fMulMessages(records: msg[], pageNum: number, totalPages: number, totalCount: number, useForwardMsg: boolean = false): string {
+  const output = records.map(record => {
+    const date = record.timestamp
+    const fDate = formatDate(date, true)
+    return `#${record.id} [${fDate}] ${record.senderName}: \n${record.content}\n`
+  })
+
+  output.unshift(`第 ${pageNum}/${totalPages} 页, 共${totalCount}条记录`)
+  return output.join('\n')
+}
+
 export function apply(ctx: Context, config: Config) {
   ctx.model.extend('chat_archive', {
     id: 'unsigned',
@@ -82,39 +148,15 @@ export function apply(ctx: Context, config: Config) {
   ctx.command('rollchat')
     .userFields(['authority'])
     .action(async ({ session }) => {
-      // 检查权限
-      if (session.user.authority < config.rollchatAuth) {
-        return '你没有权限执行此操作'
-      }
-
-      if (!session?.guildId) {
-        return '你知道的，这是群聊指令，为什么要私聊使用呢？'
-      }
+      const _check = checkSth(session, config.rollchatAuth)
+      if (_check) return _check
 
       const records = await ctx.database.get('chat_archive', { groupId: session.guildId })
       if (!records.length) {
         return '当前群聊还没有存储任何的聊天记录'
       }
       const rRecord = records[Math.floor(Math.random() * records.length)]
-      const date = rRecord.timestamp
-      const formattedDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
-
-      if (config.useForwardMsg) {
-        // 使用合并转发方式
-        const senderInfo = {
-          userId: rRecord.senderId,
-          nickname: rRecord.senderName,
-        }
-        const content = [
-          `[${formattedDate}] ${rRecord.senderName}:\n`,
-          ...segment.parse(rRecord.content)
-        ]
-        const forwardNode = segment("message", senderInfo, content)
-        return segment("message", { forward: true }, [forwardNode])
-      } else {
-        // 使用文本方式
-        return `[${formattedDate}] ${rRecord.senderName}:\n${rRecord.content}`
-      }
+      return fSigMessage(rRecord, config.useForwardMsg) as string
     })
 
 
@@ -122,14 +164,8 @@ export function apply(ctx: Context, config: Config) {
   ctx.command('savechat')
     .userFields(['authority'])
     .action(async ({ session }) => {
-      // 检查权限
-      if (session.user.authority < config.savechatAuth) {
-        return '你没有权限执行此操作'
-      }
-
-      if (!session?.guildId) {
-        return '你知道的，这是群聊指令，为什么要私聊使用呢？'
-      }
+      const _check = checkSth(session, config.savechatAuth)
+      if (_check) return _check
 
       if (!session?.quote) {
         return '使用 savechat 指令需要引用对方的消息'
@@ -172,16 +208,10 @@ export function apply(ctx: Context, config: Config) {
   ctx.command('delchat <id:number>')
     .userFields(['authority'])
     .action(async ({ session }, id) => {
-      // 检查权限
-      if (session.user.authority < config.delchatAuth) {
-        return '你没有权限执行此操作'
-      }
+      const _check = checkSth(session, config.delchatAuth)
+      if (_check) return _check
 
-      if (!session?.guildId) {
-        return '你知道的，这是群聊指令，为什么要私聊使用呢？'
-      }
-
-      if (!id) {``
+      if (!id) {
         return '你需要提供一个整数参数作为需要删除的消息的 id'
       }
 
@@ -201,14 +231,8 @@ export function apply(ctx: Context, config: Config) {
     .option('this', '--this 清空当前群聊的数据库')
     .option('all', '--all 清空所有群聊的数据库')
     .action(async ({ session, options }) => {
-      // 检查权限
-      if (session.user.authority < config.resetchatAuth) {
-        return '你没有权限执行此操作'
-      }
-
-      if (!session?.guildId) {
-        return '你知道的，这是群聊指令，为什么要私聊使用呢？'
-      }
+      const _check = checkSth(session, config.resetchatAuth)
+      if (_check) return _check
 
       if (!options.this && !options.all) {
         return [
@@ -241,14 +265,8 @@ export function apply(ctx: Context, config: Config) {
     .option('page', '-p <page:number> 查询指定页码')
     .option('single', '-s <id:number> 查询单个序号的消息')
     .action(async ({ session, options }) => {
-      // 检查权限
-      if (session.user.authority < config.listchatAuth) {
-        return '你没有权限执行此操作'
-      }
-
-      if (!session?.guildId) {
-        return '你知道的，这是群聊指令，为什么要私聊使用呢？'
-      }
+      const _check = checkSth(session, config.listchatAuth)
+      if (_check) return _check
 
       if (!options.page && !options.single) {
         return [
@@ -269,11 +287,9 @@ export function apply(ctx: Context, config: Config) {
         return '当前群聊没有存储任何的聊天记录'
       }
 
-      // 按照时间排序（最新的在顶前面）
       const sRecords = allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 
       if (options.single) {
-        // -s：查询单个序号
         const targetId = options.single
         const record = sRecords.find(r => r.id === targetId)
 
@@ -281,15 +297,10 @@ export function apply(ctx: Context, config: Config) {
           return `没有找到信息 #${targetId} `
         }
 
-        const date = record.timestamp
-        const fDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
-
-        return `#${record.id} [${fDate}] ${record.senderName}: ${record.content}`
+        return fSigMessage(record, config.useForwardMsg) as string
       }
 
-
       if (options.page) {
-        // -p：查询页码
         const pageNum = options.page || 1
         if (pageNum < 1) {
           return '页码必须大于0 :('
@@ -305,14 +316,7 @@ export function apply(ctx: Context, config: Config) {
         const offset = (pageNum - 1) * pageSize
         const pageInfo = sRecords.slice(offset, offset + pageSize)
 
-        const output = pageInfo.map(record => {
-          const date = record.timestamp
-          const fDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
-          return `#${record.id} [${fDate}] ${record.senderName}: \n ${record.content}\n`
-        })
-
-        output.unshift(`第 ${pageNum}/${totalPages} 页, 共${totalCount}条记录`)
-        return output.join('\n')
+        return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
       }
     })
 
@@ -321,17 +325,11 @@ export function apply(ctx: Context, config: Config) {
     .userFields(['authority'])
     .option('page', '-p <page:number> 查询指定页码')
     .action(async ({ session, options }, keywords) => {
-      // 检查权限
-      if (session.user.authority < config.findchatAuth) {
-        return '你没有权限执行此操作'
-      }
-
-      if (!session?.guildId) {
-        return '你知道的，这是群聊指令，为什么要私聊使用呢？'
-      }
+      const _check = checkSth(session, config.findchatAuth)
+      if (_check) return _check
 
       if (!keywords) {
-        return '请输入 findchat + 要搜索的关键词，多个关键词用空格分隔'
+        return '请输入 findchat <空格> 要搜索的关键词，多个关键词用空格分隔'
       }
 
       const kwList = keywords.split(/\s+/).filter(k => k.trim().length > 0)
@@ -339,6 +337,7 @@ export function apply(ctx: Context, config: Config) {
       if (kwList.length === 0) {
         return '不知道你输入了什么 :('
       }
+
       const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
       const fRecords = allRecords.filter(record => {
         const content = record.content.toLowerCase()
@@ -369,12 +368,6 @@ export function apply(ctx: Context, config: Config) {
       const offset = (pageNum - 1) * pageSize
       const pageInfo = sRecords.slice(offset, offset + pageSize)
 
-      const output = pageInfo.map(record => {
-        const date = record.timestamp
-        const fDate = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
-        return `#${record.id} [${fDate}] ${record.senderName}: \n ${record.content}\n`
-      })
-      output.unshift(`第 ${pageNum}/${totalPages} 页, 共找到${totalCount}条记录`)
-      return output.join('\n')
+      return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
     })
 }
