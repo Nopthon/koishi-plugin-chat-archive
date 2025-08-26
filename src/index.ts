@@ -13,7 +13,6 @@ export interface Config {
   findchatAuth: number
   chatPageSize: number
   useForwardMsg: boolean
-
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -46,10 +45,8 @@ export const Config: Schema<Config> = Schema.object({
   listchatAuth: Schema.natural().default(1).description('listchat 指令的权限等级'),
   findchatAuth: Schema.natural().default(1).description('findchat 指令的权限等级'),
   chatPageSize: Schema.natural().default(7).description('-p 参数每页显示的消息数量'),
-
 })
 
-// 定义数据库结构的接口
 interface msg {
   id: number
   groupId: string
@@ -59,76 +56,55 @@ interface msg {
   timestamp: Date
 }
 
-// 为什么我还要单独告诉 Koishi 我新建了一个表单呢 :(
 declare module 'koishi' {
   interface Tables {
     chat_archive: msg
   }
 }
 
-
-// 权限检查函数
-// 我终于知道要把重复使用的指令封装一下了
-function checkSth(session: any, _Auth: number): string | null {
-  if (session.user.authority < _Auth) {
-    return '你没有权限执行此操作'
-  }
-
-  if (!session?.guildId) {
-    return '你知道的，这是群聊指令，为什么要私聊使用呢？'
-  }
-
+function checkSth(session: any, auth: number): string | null {
+  if (session.user.authority < auth) return '你没有权限执行此操作'
+  if (!session?.guildId) return '你知道的，这是群聊指令，为什么要私聊使用呢？'
   return null
 }
 
-// 日期格式化函数，为了可读性把那一坨参数拆开来了，好让你知道 isShort 参数的作用
-function formatDate(date: Date, isShort: boolean = false): string {
-  const month = (date.getMonth() + 1).toString().padStart(2, '0')
-  const day = date.getDate().toString().padStart(2, '0')
-  const hours = date.getHours().toString().padStart(2, '0')
-  const minutes = date.getMinutes().toString().padStart(2, '0')
+function formatDate(date: Date, isShort = false): string {
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  const year = date.getFullYear()
+  const month = pad(date.getMonth() + 1)
+  const day = pad(date.getDate())
+  const hours = pad(date.getHours())
+  const minutes = pad(date.getMinutes())
+  const seconds = pad(date.getSeconds())
 
-  if (isShort) {
-    return `${month}-${day} ${hours}:${minutes}`
-  } else {
-    const seconds = date.getSeconds().toString().padStart(2, '0')
-    const year = date.getFullYear()
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
-  }
+  return isShort ? `${month}-${day} ${hours}:${minutes}` : `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
 }
 
-// 单条消息输出函数
-function fSigMessage(record: msg, useForwardMsg: boolean = false): string | segment {
-  const date = record.timestamp
-  const fDate = formatDate(date, false)
+function formatMessage(record: msg, useForwardMsg = false): string | segment {
+  const dateStr = formatDate(record.timestamp, false)
 
   if (useForwardMsg) {
-    const senderInfo = {
-      userId: record.senderId,
-      nickname: record.senderName,
-    }
-    const content = [
-      `[${fDate}] ${record.senderName}:\n`,
-      ...segment.parse(record.content)
-    ]
-    const forwardNode = segment("message", senderInfo, content)
-    return segment("message", { forward: true }, [forwardNode])
-  } else {
-    return `[${fDate}] ${record.senderName}:\n${record.content}`
+    return segment("message", { forward: true }, [
+      segment("message", {
+        userId: record.senderId,
+        nickname: record.senderName
+      }, [
+        `[${dateStr}] ${record.senderName}:\n`,
+        ...segment.parse(record.content)
+      ])
+    ])
   }
+
+  return `[${dateStr}] ${record.senderName}:\n${record.content}`
 }
 
-// 多条消息输出函数
-// TODO: 加上合并转发，在我意识到怎么构造合并转发信息之后
-function fMulMessages(records: msg[], pageNum: number, totalPages: number, totalCount: number, useForwardMsg: boolean = false): string {
-  const output = records.map(record => {
-    const date = record.timestamp
-    const fDate = formatDate(date, true)
-    return `#${record.id} [${fDate}] ${record.senderName}: \n${record.content}\n`
+function formatMessages(records: msg[], pageNum: number, totalPages: number, totalCount: number): string {
+  const messages = records.map(record => {
+    const dateStr = formatDate(record.timestamp, true)
+    return `#${record.id} [${dateStr}] ${record.senderName}: \n${record.content}\n`
   })
 
-  output.unshift(`第 ${pageNum}/${totalPages} 页, 共${totalCount}条记录`)
-  return output.join('\n')
+  return [`第 ${pageNum}/${totalPages} 页, 共${totalCount}条记录`, ...messages].join('\n')
 }
 
 export function apply(ctx: Context, config: Config) {
@@ -139,235 +115,155 @@ export function apply(ctx: Context, config: Config) {
     senderName: 'string',
     content: 'text',
     timestamp: 'timestamp',
-  }, {
-    autoInc: true,  // 这一条方便 id 自增
-  })
+  }, { autoInc: true })
 
-
-  // rollchat 命令
   ctx.command('rollchat')
     .userFields(['authority'])
     .action(async ({ session }) => {
-      const _check = checkSth(session, config.rollchatAuth)
-      if (_check) return _check
+      const check = checkSth(session, config.rollchatAuth)
+      if (check) return check
 
       const records = await ctx.database.get('chat_archive', { groupId: session.guildId })
-      if (!records.length) {
-        return '当前群聊还没有存储任何的聊天记录'
-      }
-      const rRecord = records[Math.floor(Math.random() * records.length)]
-      return fSigMessage(rRecord, config.useForwardMsg) as string
+      if (!records.length) return '当前群聊还没有存储任何的聊天记录'
+
+      const randomRecord = records[Math.floor(Math.random() * records.length)]
+      return formatMessage(randomRecord, config.useForwardMsg) as string
     })
 
-
-  // savechat 命令
   ctx.command('savechat')
     .userFields(['authority'])
     .action(async ({ session }) => {
-      const _check = checkSth(session, config.savechatAuth)
-      if (_check) return _check
-
-      if (!session?.quote) {
-        return '使用 savechat 指令需要引用对方的消息'
-      }
+      const check = checkSth(session, config.savechatAuth)
+      if (check) return check
+      if (!session?.quote) return '使用 savechat 指令需要引用对方的消息'
 
       const quotedMsg = session.quote
-      if (!quotedMsg.content) {
-        return '无法获取消息内容...?'
-      }
+      if (!quotedMsg.content) return '无法获取消息内容...?'
+      if (!quotedMsg.user) return '无法获取群u信息...?'
 
       const user = quotedMsg.user
-      if (!user) {
-        return '无法获取群u信息...?'
-      }
-
       let senderName = user.name || 'unknown'
+
       if (config.useGroupNickname) {
         const memberInfo = await session.bot.getGuildMember(session.guildId, user.id).catch(() => null)
-        if (memberInfo?.nickname) {
-          senderName = memberInfo.nickname
-        } else if (memberInfo?.user?.name) {
-          senderName = memberInfo.user.name
-        }
+        if (memberInfo?.nickname) senderName = memberInfo.nickname
+        else if (memberInfo?.user?.name) senderName = memberInfo.user.name
       }
 
-      // 存储到数据库
-      const chat_archive = await ctx.database.create('chat_archive', {
+      const chatArchive = await ctx.database.create('chat_archive', {
         groupId: session.guildId,
         senderId: user.id,
-        senderName: senderName,
+        senderName,
         content: quotedMsg.content,
         timestamp: new Date(quotedMsg.timestamp || Date.now()),
       })
-      // 
-      return `#${chat_archive.id} 消息已储存`
+
+      return `#${chatArchive.id} 消息已储存`
     })
 
-
-  // delchat 命令
   ctx.command('delchat <id:number>')
     .userFields(['authority'])
     .action(async ({ session }, id) => {
-      const _check = checkSth(session, config.delchatAuth)
-      if (_check) return _check
-
-      if (!id) {
-        return '你需要提供一个整数参数作为需要删除的消息的 id'
-      }
+      const check = checkSth(session, config.delchatAuth)
+      if (check) return check
+      if (!id) return '你需要提供一个整数参数作为需要删除的消息的 id'
 
       const records = await ctx.database.get('chat_archive', { id, groupId: session.guildId })
-      if (!records.length) {
-        return `未找到 #${id} 消息记录`
-      }
+      if (!records.length) return `未找到 #${id} 消息记录`
 
       await ctx.database.remove('chat_archive', { id })
       return `已删除 #${id} 消息记录`
     })
 
-
-  // resetchat 命令
   ctx.command('resetchat [option:string]')
     .userFields(['authority'])
     .option('this', '--this 清空当前群聊的数据库')
     .option('all', '--all 清空所有群聊的数据库')
     .action(async ({ session, options }) => {
-      const _check = checkSth(session, config.resetchatAuth)
-      if (_check) return _check
+      const check = checkSth(session, config.resetchatAuth)
+      if (check) return check
 
-      if (!options.this && !options.all) {
-        return [
-          '参数二选一：', '--this 清空当前群聊聊天信息', '或 --all 清空所有群聊聊天信息'
-        ].join('\n')
-      }
+      if (!options.this && !options.all)
+        return '参数二选一：\n--this 清空当前群聊聊天信息\n或 --all 清空所有群聊聊天信息'
 
-      if (options.this && options.all) {
-        return '不能同时使用 --this 和 --all 参数'
-      }
+      if (options.this && options.all) return '不能同时使用 --this 和 --all 参数'
 
+      let result
       if (options.this) {
-        // 清空当前群聊的数据库
-        const result = await ctx.database.remove('chat_archive', { groupId: session.guildId })
+        result = await ctx.database.remove('chat_archive', { groupId: session.guildId })
         return `已清空当前群聊的 ${result.matched} 条消息记录`
       }
 
-      if (options.all) {
-        // 清空所有群聊的数据库
-        const result = await ctx.database.remove('chat_archive', {})
-        return `已清空所有群聊的 ${result.matched} 条消息记录`
-      }
-
+      result = await ctx.database.remove('chat_archive', {})
+      return `已清空所有群聊的 ${result.matched} 条消息记录`
     })
 
-
-  // listchat 命令
   ctx.command('listchat')
     .userFields(['authority'])
     .option('page', '-p <page:number> 查询指定页码')
     .option('single', '-s <id:number> 查询单个序号的消息')
     .action(async ({ session, options }) => {
-      const _check = checkSth(session, config.listchatAuth)
-      if (_check) return _check
+      const check = checkSth(session, config.listchatAuth)
+      if (check) return check
 
-      if (!options.page && !options.single) {
-        return [
-          '参数二选一：',
-          '-p <页码> 查询指定页码',
-          '-s <序号> 查询单个序号的消息'
-        ].join('\n')
-      }
+      if (!options.page && !options.single)
+        return '参数二选一：\n-p <页码> 查询指定页码\n-s <序号> 查询单个序号的消息'
 
-      if (options.page && options.single) {
-        return '不能同时使用 -p 和 -s 参数'
-      }
+      if (options.page && options.single) return '不能同时使用 -p 和 -s 参数'
 
       const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
-      const totalCount = allRecords.length
+      if (!allRecords.length) return '当前群聊没有存储任何的聊天记录'
 
-      if (totalCount === 0) {
-        return '当前群聊没有存储任何的聊天记录'
-      }
-
-      const sRecords = allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      const sortedRecords = allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 
       if (options.single) {
-        const targetId = options.single
-        const record = sRecords.find(r => r.id === targetId)
-
-        if (!record) {
-          return `没有找到信息 #${targetId} `
-        }
-
-        return fSigMessage(record, config.useForwardMsg) as string
+        const record = sortedRecords.find(r => r.id === options.single)
+        return record ? formatMessage(record, config.useForwardMsg) as string : `没有找到信息 #${options.single}`
       }
 
-      if (options.page) {
-        const pageNum = options.page || 1
-        if (pageNum < 1) {
-          return '页码必须大于0 :('
-        }
+      const pageNum = options.page || 1
+      if (pageNum < 1) return '页码必须大于0 :('
 
-        const pageSize = config.chatPageSize
-        const totalPages = Math.ceil(totalCount / pageSize)
+      const pageSize = config.chatPageSize
+      const totalPages = Math.ceil(allRecords.length / pageSize)
+      if (pageNum > totalPages) return `当前总共只有 ${totalPages} 页聊天记录`
 
-        if (pageNum > totalPages) {
-          return `当前总共只有 ${totalPages} 页聊天记录`
-        }
+      const offset = (pageNum - 1) * pageSize
+      const pageRecords = sortedRecords.slice(offset, offset + pageSize)
 
-        const offset = (pageNum - 1) * pageSize
-        const pageInfo = sRecords.slice(offset, offset + pageSize)
-
-        return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
-      }
+      return formatMessages(pageRecords, pageNum, totalPages, allRecords.length)
     })
 
-  // findchat 命令
   ctx.command('findchat <keywords:text>')
     .userFields(['authority'])
     .option('page', '-p <page:number> 查询指定页码')
     .action(async ({ session, options }, keywords) => {
-      const _check = checkSth(session, config.findchatAuth)
-      if (_check) return _check
+      const check = checkSth(session, config.findchatAuth)
+      if (check) return check
+      if (!keywords) return '请输入 findchat <空格> 要搜索的关键词，多个关键词用空格分隔'
 
-      if (!keywords) {
-        return '请输入 findchat <空格> 要搜索的关键词，多个关键词用空格分隔'
-      }
-
-      const kwList = keywords.split(/\s+/).filter(k => k.trim().length > 0)
-
-      if (kwList.length === 0) {
-        return '不知道你输入了什么 :('
-      }
+      const kwList = keywords.split(/\s+/).filter(k => k.trim())
+      if (!kwList.length) return '不知道你输入了什么 :('
 
       const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
-      const fRecords = allRecords.filter(record => {
-        const content = record.content.toLowerCase()
-        return kwList.every(keyword => content.includes(keyword.toLowerCase()))
-      })
+      const filteredRecords = allRecords.filter(record =>
+        kwList.every(keyword => record.content.toLowerCase().includes(keyword.toLowerCase()))
+      )
 
-      const totalCount = fRecords.length
+      if (!filteredRecords.length)
+        return `没有找到同时包含 ${kwList.map(k => `"${k}"`).join(' 和 ')} 的聊天记录`
 
-      if (totalCount === 0) {
-        const keywordStr = kwList.map(k => `"${k}"`).join(' 和 ')
-        return `没有找到同时包含 ${keywordStr} 的聊天记录`
-      }
-
-      const sRecords = fRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-
+      const sortedRecords = filteredRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
       const pageNum = options.page || 1
-      if (pageNum < 1) {
-        return '页码必须大于0 :('
-      }
+      if (pageNum < 1) return '页码必须大于0 :('
 
       const pageSize = config.chatPageSize
-      const totalPages = Math.ceil(totalCount / pageSize)
-
-      if (pageNum > totalPages) {
-        return `当前总共只有 ${totalPages} 页聊天记录`
-      }
+      const totalPages = Math.ceil(filteredRecords.length / pageSize)
+      if (pageNum > totalPages) return `当前总共只有 ${totalPages} 页聊天记录`
 
       const offset = (pageNum - 1) * pageSize
-      const pageInfo = sRecords.slice(offset, offset + pageSize)
+      const pageRecords = sortedRecords.slice(offset, offset + pageSize)
 
-      return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
+      return formatMessages(pageRecords, pageNum, totalPages, filteredRecords.length)
     })
 }
