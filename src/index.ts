@@ -16,8 +16,7 @@ export interface Config {
 
 }
 
-export const Config: Schema<Config> = Schema.object({
-  ' ': Schema.never().description(`
+export const usage = `
 ## 这里是 Chat-Archive 插件使用说明：
 
 ### 这个插件可以储存群u的发言，并且支持查询/随机发送等操作
@@ -27,16 +26,19 @@ export const Config: Schema<Config> = Schema.object({
 ### 这里是指令说明
 
 - **savechat**: 引用消息进行存档
+  - savechat -t <tag> 或 savechat <tag> 可为消息设置标签
 - **rollchat**: 随机查看一条存档消息
-- **listchat**: 查看存档消息，-p 参数指定页码查找；-s 参数指定特定编号查找
+- **listchat**: 查看存档消息，-p 参数指定页码；-s 参数指定特定编号查找
 - **delchat**: 删除聊天存档中的单条指定消息
 - **resetchat**: 清空单个群聊（--this）/ 所有群聊（--all）的聊天存档
 - **findchat**: 对存档进行关键词查询，多个关键词之间用空格分隔，不区分大小写
+  - 也可以额外使用 -t 标签对特定标签进行查询
 
 ### 插件目前处于“开发中”状态，可能会有意想不到的 bug 产生
 
+`
 
-  `),
+export const Config: Schema<Config> = Schema.object({
   useGroupNickname: Schema.boolean().default(true).description('savechat时储存消息发送者的名字使用（关：QQ名称 开：群昵称）'),
   savechatAuth: Schema.natural().default(1).description('savechat 指令的权限等级'),
   rollchatAuth: Schema.natural().default(1).description('rollchat 指令的权限等级'),
@@ -52,6 +54,7 @@ export const Config: Schema<Config> = Schema.object({
 // 定义数据库结构的接口
 interface msg {
   id: number
+  tag: string
   groupId: string
   senderId: string
   senderName: string
@@ -134,6 +137,7 @@ function fMulMessages(records: msg[], pageNum: number, totalPages: number, total
 export function apply(ctx: Context, config: Config) {
   ctx.model.extend('chat_archive', {
     id: 'unsigned',
+    tag: 'string',
     groupId: 'string',
     senderId: 'string',
     senderName: 'string',
@@ -161,9 +165,10 @@ export function apply(ctx: Context, config: Config) {
 
 
   // savechat 命令
-  ctx.command('savechat')
+  ctx.command('savechat [tag:string]')
     .userFields(['authority'])
-    .action(async ({ session }) => {
+    .option('tag', '-t <tag:string> 为消息添加标签')
+    .action(async ({ session, options }, tag) => {
       const _check = checkSth(session, config.savechatAuth)
       if (_check) return _check
 
@@ -181,6 +186,9 @@ export function apply(ctx: Context, config: Config) {
         return '无法获取群u信息...?'
       }
 
+      // 确定 tag 值：优先使用 -t 选项，其次是位置参数
+      const Tag = options.tag || tag || ''
+
       let senderName = user.name || 'unknown'
       if (config.useGroupNickname) {
         const memberInfo = await session.bot.getGuildMember(session.guildId, user.id).catch(() => null)
@@ -193,14 +201,15 @@ export function apply(ctx: Context, config: Config) {
 
       // 存储到数据库
       const chat_archive = await ctx.database.create('chat_archive', {
+        tag: Tag,
         groupId: session.guildId,
         senderId: user.id,
         senderName: senderName,
         content: quotedMsg.content,
         timestamp: new Date(quotedMsg.timestamp || Date.now()),
       })
-      // 
-      return `#${chat_archive.id} 消息已储存`
+
+      return `#${chat_archive.id} 消息已储存${Tag ? `，Tag: ${Tag}` : ''}`
     })
 
 
@@ -259,96 +268,107 @@ export function apply(ctx: Context, config: Config) {
     })
 
 
-  // listchat 命令
-  ctx.command('listchat')
-    .userFields(['authority'])
-    .option('page', '-p <page:number> 查询指定页码')
-    .option('single', '-s <id:number> 查询单个序号的消息')
-    .action(async ({ session, options }) => {
-      const _check = checkSth(session, config.listchatAuth)
-      if (_check) return _check
+// listchat 命令
+ctx.command('listchat')
+  .userFields(['authority'])
+  .option('page', '-p <page:number> 翻页')
+  .option('single', '-s <id:number> 查询单个序号的消息')
+  .action(async ({ session, options }) => {
+    const _check = checkSth(session, config.listchatAuth)
+    if (_check) return _check
 
-      if (!options.page && !options.single) {
-        return [
-          '参数二选一：',
-          '-p <页码> 查询指定页码',
-          '-s <序号> 查询单个序号的消息'
-        ].join('\n')
+    if (!options.page && !options.single) {
+      options.page = 1
+    }
+
+    if (options.page && options.single) {
+      return '不能同时使用 -p 和 -s 参数'
+    }
+
+    const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
+    const totalCount = allRecords.length
+
+    if (totalCount === 0) {
+      return '当前群聊没有存储任何的聊天记录'
+    }
+
+    const sRecords = allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+
+    if (options.single) {
+      const targetId = options.single
+      const record = sRecords.find(r => r.id === targetId)
+
+      if (!record) {
+        return `没有找到信息 #${targetId} `
       }
 
-      if (options.page && options.single) {
-        return '不能同时使用 -p 和 -s 参数'
+      return fSigMessage(record, config.useForwardMsg) as string
+    }
+
+    if (options.page) {
+      const pageNum = options.page || 1
+      if (pageNum < 1) {
+        return '页码必须大于0 :('
       }
 
-      const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
-      const totalCount = allRecords.length
+      const pageSize = config.chatPageSize
+      const totalPages = Math.ceil(totalCount / pageSize)
 
-      if (totalCount === 0) {
-        return '当前群聊没有存储任何的聊天记录'
+      if (pageNum > totalPages) {
+        return `当前总共只有 ${totalPages} 页聊天记录`
       }
 
-      const sRecords = allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      const offset = (pageNum - 1) * pageSize
+      const pageInfo = sRecords.slice(offset, offset + pageSize)
 
-      if (options.single) {
-        const targetId = options.single
-        const record = sRecords.find(r => r.id === targetId)
-
-        if (!record) {
-          return `没有找到信息 #${targetId} `
-        }
-
-        return fSigMessage(record, config.useForwardMsg) as string
-      }
-
-      if (options.page) {
-        const pageNum = options.page || 1
-        if (pageNum < 1) {
-          return '页码必须大于0 :('
-        }
-
-        const pageSize = config.chatPageSize
-        const totalPages = Math.ceil(totalCount / pageSize)
-
-        if (pageNum > totalPages) {
-          return `当前总共只有 ${totalPages} 页聊天记录`
-        }
-
-        const offset = (pageNum - 1) * pageSize
-        const pageInfo = sRecords.slice(offset, offset + pageSize)
-
-        return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
-      }
-    })
+      return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
+    }
+  })
 
   // findchat 命令
   ctx.command('findchat <keywords:text>')
     .userFields(['authority'])
-    .option('page', '-p <page:number> 查询指定页码')
+    .option('page', '-p <page:number> 翻页')
+    .option('tag', '-t <tag:string> 按标签筛选')
     .action(async ({ session, options }, keywords) => {
       const _check = checkSth(session, config.findchatAuth)
       if (_check) return _check
 
-      if (!keywords) {
-        return '请输入 findchat <空格> 要搜索的关键词，多个关键词用空格分隔'
+      if (!keywords && !options.tag) {
+        return '请输入 findchat <空格> 要搜索的关键词，多个关键词用空格分隔，或使用 -t 按标签搜索'
       }
 
-      const kwList = keywords.split(/\s+/).filter(k => k.trim().length > 0)
+      const kwList = keywords ? keywords.split(/\s+/).filter(k => k.trim().length > 0) : []
 
-      if (kwList.length === 0) {
-        return '不知道你输入了什么 :('
+      // 构建查询条件
+      const query: any = { groupId: session.guildId }
+
+      // 添加标签筛选条件
+      if (options.tag) {
+        query.tag = options.tag
       }
 
-      const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
-      const fRecords = allRecords.filter(record => {
-        const content = record.content.toLowerCase()
-        return kwList.every(keyword => content.includes(keyword.toLowerCase()))
-      })
+      const allRecords = await ctx.database.get('chat_archive', query)
+
+      // 关键词筛选
+      const fRecords = kwList.length > 0
+        ? allRecords.filter(record => {
+          const content = record.content.toLowerCase()
+          return kwList.every(keyword => content.includes(keyword.toLowerCase()))
+        })
+        : allRecords
 
       const totalCount = fRecords.length
 
       if (totalCount === 0) {
-        const keywordStr = kwList.map(k => `"${k}"`).join(' 和 ')
-        return `没有找到同时包含 ${keywordStr} 的聊天记录`
+        if (options.tag) {
+          return kwList.length > 0
+            ? `没有找到标签为 "${options.tag}" 且包含指定关键词的聊天记录`
+            : `没有找到标签为 "${options.tag}" 的聊天记录`
+        } else {
+          const keywordStr = kwList.map(k => `"${k}"`).join(' 和 ')
+          return `没有找到同时包含 ${keywordStr} 的聊天记录`
+        }
       }
 
       const sRecords = fRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
