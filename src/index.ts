@@ -1,19 +1,24 @@
 import { Context, Schema, segment } from 'koishi'
+import * as fs from 'fs'
+import * as path from 'path'
 
 export const name = 'chat-archive'
 export const using = ['database']
 
 export interface Config {
-  useGroupNickname: boolean
-  savechatAuth: number
-  rollchatAuth: number
-  delchatAuth: number
-  resetchatAuth: number
-  listchatAuth: number
-  findchatAuth: number
-  chatPageSize: number
-  useForwardMsg: boolean
-
+  Settings: {
+    useGroupNickname: boolean
+    useForwardMsg: boolean
+    chatPageSize: number
+  }
+  Permissions: {
+    savechatAuth: number
+    rollchatAuth: number
+    delchatAuth: number
+    resetchatAuth: number
+    listchatAuth: number
+    findchatAuth: number
+  }
 }
 
 export const usage = `
@@ -27,29 +32,61 @@ export const usage = `
 
 - **savechat**: 引用消息进行存档
   - savechat -t <tag> 或 savechat <tag> 可为消息设置标签
+  - 注意：tag不能和被引用的文本完全一致！
+
 - **rollchat**: 随机查看一条存档消息
+
 - **listchat**: 查看存档消息，-p 参数指定页码；-s 参数指定特定编号查找
+
 - **delchat**: 删除聊天存档中的单条指定消息
+
 - **resetchat**: 清空单个群聊（--this）/ 所有群聊（--all）的聊天存档
+
 - **findchat**: 对存档进行关键词查询，多个关键词之间用空格分隔，不区分大小写
-  - 也可以额外使用 -t 标签对特定标签进行查询
+
+  - 语法 findchat <key1> [key2] ...
+
+  - 也可以额外使用 -t 标签对特定标签进行查询，比如 findchat -t <tag> [key1] [key2] ...
 
 ### 插件目前处于“开发中”状态，可能会有意想不到的 bug 产生
 
 `
 
 export const Config: Schema<Config> = Schema.object({
-  useGroupNickname: Schema.boolean().default(true).description('savechat时储存消息发送者的名字使用（关：QQ名称 开：群昵称）'),
-  savechatAuth: Schema.natural().default(1).description('savechat 指令的权限等级'),
-  rollchatAuth: Schema.natural().default(1).description('rollchat 指令的权限等级'),
-  useForwardMsg: Schema.boolean().default(false).description(`【尚未实现】是否使用合并转发方式输出（关：文本输出 开：转发输出）`),
-  delchatAuth: Schema.natural().default(2).description('delchat 指令的权限等级'),
-  resetchatAuth: Schema.natural().default(2).description('resetchat 指令的权限等级'),
-  listchatAuth: Schema.natural().default(1).description('listchat 指令的权限等级'),
-  findchatAuth: Schema.natural().default(1).description('findchat 指令的权限等级'),
-  chatPageSize: Schema.natural().default(7).description('-p 参数每页显示的消息数量'),
+  Settings: Schema.object({
+    useGroupNickname: Schema.boolean()
+      .default(true)
+      .description('savechat时储存消息发送者的名字使用（关：QQ名称 开：群昵称）'),
+    useForwardMsg: Schema.boolean()
+      .default(false)
+      .description('【尚未实现】是否使用合并转发方式输出（关：文本输出 开：转发输出）'),
+    chatPageSize: Schema.natural()
+      .default(7)
+      .description('-p 参数每页显示的消息数量'),
+  }).description('功能设置'),
 
+  Permissions: Schema.object({
+    savechatAuth: Schema.natural()
+      .default(1)
+      .description('savechat 指令的权限等级'),
+    rollchatAuth: Schema.natural()
+      .default(1)
+      .description('rollchat 指令的权限等级'),
+    delchatAuth: Schema.natural()
+      .default(2)
+      .description('delchat 指令的权限等级'),
+    resetchatAuth: Schema.natural()
+      .default(2)
+      .description('resetchat 指令的权限等级'),
+    listchatAuth: Schema.natural()
+      .default(1)
+      .description('listchat 指令的权限等级'),
+    findchatAuth: Schema.natural()
+      .default(1)
+      .description('findchat 指令的权限等级'),
+  }).description('权限设置'),
 })
+
 
 // 定义数据库结构的接口
 interface msg {
@@ -152,7 +189,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.command('rollchat')
     .userFields(['authority'])
     .action(async ({ session }) => {
-      const _check = checkSth(session, config.rollchatAuth)
+      const _check = checkSth(session, config.Permissions.rollchatAuth)
       if (_check) return _check
 
       const records = await ctx.database.get('chat_archive', { groupId: session.guildId })
@@ -160,7 +197,7 @@ export function apply(ctx: Context, config: Config) {
         return '当前群聊还没有存储任何的聊天记录'
       }
       const rRecord = records[Math.floor(Math.random() * records.length)]
-      return fSigMessage(rRecord, config.useForwardMsg) as string
+      return fSigMessage(rRecord, config.Settings.useForwardMsg) as string
     })
 
 
@@ -169,7 +206,7 @@ export function apply(ctx: Context, config: Config) {
     .userFields(['authority'])
     .option('tag', '-t <tag:string> 为消息添加标签')
     .action(async ({ session, options }, tag) => {
-      const _check = checkSth(session, config.savechatAuth)
+      const _check = checkSth(session, config.Permissions.savechatAuth)
       if (_check) return _check
 
       if (!session?.quote) {
@@ -187,10 +224,15 @@ export function apply(ctx: Context, config: Config) {
       }
 
       // 确定 tag 值：优先使用 -t 选项，其次是位置参数
-      const Tag = options.tag || tag || ''
+      let Tag = options.tag || tag || ''
+      // 考虑到引用的信息会被作为 savechat 后的内容储存（我也不知道为什么），进行了特殊规定
+      // Tag 不能完全与引用文本一致
+      if (Tag === session.quote?.content) {
+        Tag = '';
+      }
 
-      let senderName = user.name || 'unknown'
-      if (config.useGroupNickname) {
+      let senderName = user.name || 'Unknown'
+      if (config.Settings.useGroupNickname) {
         const memberInfo = await session.bot.getGuildMember(session.guildId, user.id).catch(() => null)
         if (memberInfo?.nickname) {
           senderName = memberInfo.nickname
@@ -217,7 +259,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.command('delchat <id:number>')
     .userFields(['authority'])
     .action(async ({ session }, id) => {
-      const _check = checkSth(session, config.delchatAuth)
+      const _check = checkSth(session, config.Permissions.delchatAuth)
       if (_check) return _check
 
       if (!id) {
@@ -240,7 +282,7 @@ export function apply(ctx: Context, config: Config) {
     .option('this', '--this 清空当前群聊的数据库')
     .option('all', '--all 清空所有群聊的数据库')
     .action(async ({ session, options }) => {
-      const _check = checkSth(session, config.resetchatAuth)
+      const _check = checkSth(session, config.Permissions.resetchatAuth)
       if (_check) return _check
 
       if (!options.this && !options.all) {
@@ -274,7 +316,7 @@ ctx.command('listchat')
   .option('page', '-p <page:number> 翻页')
   .option('single', '-s <id:number> 查询单个序号的消息')
   .action(async ({ session, options }) => {
-    const _check = checkSth(session, config.listchatAuth)
+    const _check = checkSth(session, config.Permissions.listchatAuth)
     if (_check) return _check
 
     if (!options.page && !options.single) {
@@ -302,7 +344,7 @@ ctx.command('listchat')
         return `没有找到信息 #${targetId} `
       }
 
-      return fSigMessage(record, config.useForwardMsg) as string
+      return fSigMessage(record, config.Settings.useForwardMsg) as string
     }
 
     if (options.page) {
@@ -311,7 +353,7 @@ ctx.command('listchat')
         return '页码必须大于0 :('
       }
 
-      const pageSize = config.chatPageSize
+      const pageSize = config.Settings.chatPageSize
       const totalPages = Math.ceil(totalCount / pageSize)
 
       if (pageNum > totalPages) {
@@ -331,7 +373,7 @@ ctx.command('listchat')
     .option('page', '-p <page:number> 翻页')
     .option('tag', '-t <tag:string> 按标签筛选')
     .action(async ({ session, options }, keywords) => {
-      const _check = checkSth(session, config.findchatAuth)
+      const _check = checkSth(session, config.Permissions.findchatAuth)
       if (_check) return _check
 
       if (!keywords && !options.tag) {
@@ -378,7 +420,7 @@ ctx.command('listchat')
         return '页码必须大于0 :('
       }
 
-      const pageSize = config.chatPageSize
+      const pageSize = config.Settings.chatPageSize
       const totalPages = Math.ceil(totalCount / pageSize)
 
       if (pageNum > totalPages) {

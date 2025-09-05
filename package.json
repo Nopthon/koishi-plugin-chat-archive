@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-chat-archive",
   "description": "[UNFINISHED] Archive QQ-group menbers' awesome messages, revisiting someday ^o^",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -15,9 +15,8 @@
     "koishi",
     "plugin"
   ],
-  "devDependencies": {},
   "peerDependencies": {
-    "koishi": "^4.18.7"
+    "koishi": "^4.18.9"
   },
   "koishi": {
     "hidden": "true"
