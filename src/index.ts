@@ -1,4 +1,4 @@
-import { Context, Schema, segment } from 'koishi'
+import { Context, HTTP, Schema, segment } from 'koishi'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -10,6 +10,7 @@ export interface Config {
     useGroupNickname: boolean
     useForwardMsg: boolean
     chatPageSize: number
+    imageStoragePath: string
   }
   Permissions: {
     savechatAuth: number
@@ -63,6 +64,10 @@ export const Config: Schema<Config> = Schema.object({
     chatPageSize: Schema.natural()
       .default(7)
       .description('-p 参数每页显示的消息数量'),
+    // 添加图片存储路径配置
+    imageStoragePath: Schema.string()
+      .default('./data/chat_archive_images')
+      .description('图片本地化存储路径（相对或绝对路径），当给定的路径有误时使用默认路径'),
   }).description('功能设置'),
 
   Permissions: Schema.object({
@@ -121,7 +126,7 @@ function checkSth(session: any, _Auth: number): string | null {
   return null
 }
 
-// 日期格式化函数，为了可读性把那一坨参数拆开来了，好让你知道 isShort 参数的作用
+// 日期格式化函数，为了可读性把那一坨参数拆开来了，方便知道 isShort 参数的作用
 function formatDate(date: Date, isShort: boolean = false): string {
   const month = (date.getMonth() + 1).toString().padStart(2, '0')
   const day = date.getDate().toString().padStart(2, '0')
@@ -159,7 +164,7 @@ function fSigMessage(record: msg, useForwardMsg: boolean = false): string | segm
 }
 
 // 多条消息输出函数
-// TODO: 加上合并转发，在我意识到怎么构造合并转发信息之后
+// TODO: 加上合并转发，在我意识到怎么构造合并转发信息之后（故意加的TODO）
 function fMulMessages(records: msg[], pageNum: number, totalPages: number, totalCount: number, useForwardMsg: boolean = false): string {
   const output = records.map(record => {
     const date = record.timestamp
@@ -170,6 +175,51 @@ function fMulMessages(records: msg[], pageNum: number, totalPages: number, total
   output.unshift(`第 ${pageNum}/${totalPages} 页, 共${totalCount}条记录`)
   return output.join('\n')
 }
+
+
+// 图片本地化下载函数
+// Coded fully by Deepseek
+async function localizeImg(http, imageUrl, fileName, config) {
+  const fs = require('fs').promises;
+  const path = require('path');
+
+  // 从配置中获取存储路径，如果没有配置则使用默认路径
+  const storageDir = path.resolve(
+    process.cwd(), 
+    config.Settings.imageStoragePath || './data/chat_archive_images'
+  );
+
+  try {
+    await fs.access(storageDir);
+  } catch {
+    await fs.mkdir(storageDir, { recursive: true });
+  }
+
+  // 生成本地文件路径
+  const localFilePath = path.join(storageDir, fileName);
+
+  try {
+    const response = await http.get(imageUrl, {
+      responseType: 'stream'
+    });
+
+    const writer = require('fs').createWriteStream(localFilePath);
+    response.pipe(writer);
+
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+      response.on('error', reject);
+    });
+
+    return localFilePath;
+
+  } catch (error) {
+    console.error('localizeImg 下载图片失败:', error);
+    throw new Error(`localizeImg 无法下载图片: ${imageUrl}`);
+  }
+}
+
 
 export function apply(ctx: Context, config: Config) {
   ctx.model.extend('chat_archive', {
@@ -204,7 +254,7 @@ export function apply(ctx: Context, config: Config) {
   // savechat 命令
   ctx.command('savechat [tag:string]')
     .userFields(['authority'])
-    .option('tag', '-t <tag:string> 为消息添加标签')
+    .option('tag', '-t tag:string 为消息添加标签')
     .action(async ({ session, options }, tag) => {
       const _check = checkSth(session, config.Permissions.savechatAuth)
       if (_check) return _check
@@ -223,12 +273,17 @@ export function apply(ctx: Context, config: Config) {
         return '无法获取群u信息...?'
       }
 
-      // 确定 tag 值：优先使用 -t 选项，其次是位置参数
-      let Tag = options.tag || tag || ''
-      // 考虑到引用的信息会被作为 savechat 后的内容储存（我也不知道为什么），进行了特殊规定
+      let finalTag = ''
+      if (typeof options.tag === 'string') {
+        finalTag = options.tag
+      } else if (typeof tag === 'string') {
+        finalTag = tag
+      }
+
       // Tag 不能完全与引用文本一致
-      if (Tag === session.quote?.content) {
-        Tag = '';
+      // 原因未知
+      if (finalTag === session.quote?.content) {
+        finalTag = '';
       }
 
       let senderName = user.name || 'Unknown'
@@ -241,17 +296,53 @@ export function apply(ctx: Context, config: Config) {
         }
       }
 
+      // Subfoo: 处理图片链接并转化为本地保存
+      // Coding with GPT-5 && Deepseek
+      let rawContent = quotedMsg.content;
+
+      // 检查内容中是否包含图片
+      // One target example: <img src="https://multimedia.nt.qq.com.cn/download..." summary="[动画表情]" file="123.png" sub-type="1" file-size="12345"/>
+      const imgRegex = /<img[^>]+src="([^"]+)"[^>]*file="([^"]+)"[^>]*>/g;
+      let imgMatch;
+      const imgMatches = [];
+
+      // imgMatch[1],[2] 分别进行拆分
+      while ((imgMatch = imgRegex.exec(rawContent)) !== null) {
+        imgMatches.push({
+          fullMatch: imgMatch[0],
+          src: imgMatch[1],
+          fileName: imgMatch[2]
+        });
+      }
+
+      // 如果有图片，下载并替换为本地路径
+      if (imgMatches.length > 0) {
+        for (const img of imgMatches) {
+          try {
+
+            const localPath = await localizeImg(session.app.http, img.src, img.fileName, config);
+
+            rawContent = rawContent.replace(
+              img.fullMatch,
+              `<img src="${localPath}" file="${img.fileName}" />`
+            );
+          } catch (error) {
+            console.error(`下载图片失败: ${img.src}，使用QQ原始链接临时储存（原链接会在若干天内过期）`, error);
+          }
+        }
+      }
+
       // 存储到数据库
       const chat_archive = await ctx.database.create('chat_archive', {
-        tag: Tag,
+        tag: finalTag,
         groupId: session.guildId,
         senderId: user.id,
         senderName: senderName,
-        content: quotedMsg.content,
+        content: rawContent,    // not raw exactly
         timestamp: new Date(quotedMsg.timestamp || Date.now()),
       })
 
-      return `#${chat_archive.id} 消息已储存${Tag ? `，Tag: ${Tag}` : ''}`
+      return `#${chat_archive.id} 消息已储存${finalTag ? `，Tag: ${finalTag}` : ''}`
     })
 
 
@@ -310,62 +401,62 @@ export function apply(ctx: Context, config: Config) {
     })
 
 
-// listchat 命令
-ctx.command('listchat')
-  .userFields(['authority'])
-  .option('page', '-p <page:number> 翻页')
-  .option('single', '-s <id:number> 查询单个序号的消息')
-  .action(async ({ session, options }) => {
-    const _check = checkSth(session, config.Permissions.listchatAuth)
-    if (_check) return _check
+  // listchat 命令
+  ctx.command('listchat')
+    .userFields(['authority'])
+    .option('page', '-p <page:number> 翻页')
+    .option('single', '-s <id:number> 查询单个序号的消息')
+    .action(async ({ session, options }) => {
+      const _check = checkSth(session, config.Permissions.listchatAuth)
+      if (_check) return _check
 
-    if (!options.page && !options.single) {
-      options.page = 1
-    }
-
-    if (options.page && options.single) {
-      return '不能同时使用 -p 和 -s 参数'
-    }
-
-    const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
-    const totalCount = allRecords.length
-
-    if (totalCount === 0) {
-      return '当前群聊没有存储任何的聊天记录'
-    }
-
-    const sRecords = allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-
-    if (options.single) {
-      const targetId = options.single
-      const record = sRecords.find(r => r.id === targetId)
-
-      if (!record) {
-        return `没有找到信息 #${targetId} `
+      if (!options.page && !options.single) {
+        options.page = 1
       }
 
-      return fSigMessage(record, config.Settings.useForwardMsg) as string
-    }
-
-    if (options.page) {
-      const pageNum = options.page || 1
-      if (pageNum < 1) {
-        return '页码必须大于0 :('
+      if (options.page && options.single) {
+        return '不能同时使用 -p 和 -s 参数'
       }
 
-      const pageSize = config.Settings.chatPageSize
-      const totalPages = Math.ceil(totalCount / pageSize)
+      const allRecords = await ctx.database.get('chat_archive', { groupId: session.guildId })
+      const totalCount = allRecords.length
 
-      if (pageNum > totalPages) {
-        return `当前总共只有 ${totalPages} 页聊天记录`
+      if (totalCount === 0) {
+        return '当前群聊没有存储任何的聊天记录'
       }
 
-      const offset = (pageNum - 1) * pageSize
-      const pageInfo = sRecords.slice(offset, offset + pageSize)
+      const sRecords = allRecords.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 
-      return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
-    }
-  })
+      if (options.single) {
+        const targetId = options.single
+        const record = sRecords.find(r => r.id === targetId)
+
+        if (!record) {
+          return `没有找到信息 #${targetId} `
+        }
+
+        return fSigMessage(record, config.Settings.useForwardMsg) as string
+      }
+
+      if (options.page) {
+        const pageNum = options.page || 1
+        if (pageNum < 1) {
+          return '页码必须大于0 :('
+        }
+
+        const pageSize = config.Settings.chatPageSize
+        const totalPages = Math.ceil(totalCount / pageSize)
+
+        if (pageNum > totalPages) {
+          return `当前总共只有 ${totalPages} 页聊天记录`
+        }
+
+        const offset = (pageNum - 1) * pageSize
+        const pageInfo = sRecords.slice(offset, offset + pageSize)
+
+        return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
+      }
+    })
 
   // findchat 命令
   ctx.command('findchat <keywords:text>')
@@ -433,3 +524,5 @@ ctx.command('listchat')
       return fMulMessages(pageInfo, pageNum, totalPages, totalCount)
     })
 }
+
+// 能看到 try-catch 的部分都是 AI-Assisted 
