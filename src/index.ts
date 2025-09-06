@@ -1,4 +1,4 @@
-import { Context, HTTP, Schema, segment } from 'koishi'
+import { Context, HTTP, Schema, segment, h } from 'koishi'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -57,17 +57,17 @@ export const Config: Schema<Config> = Schema.object({
   Settings: Schema.object({
     useGroupNickname: Schema.boolean()
       .default(true)
-      .description('savechat时储存消息发送者的名字使用（关：QQ名称 开：群昵称）'),
+      .description('【尚未实现】savechat时储存消息发送者的名字使用（关：QQ名称 开：群昵称）'),
     useForwardMsg: Schema.boolean()
       .default(false)
       .description('【尚未实现】是否使用合并转发方式输出（关：文本输出 开：转发输出）'),
     chatPageSize: Schema.natural()
       .default(7)
-      .description('-p 参数每页显示的消息数量'),
+      .description('使用 -p 参数时每页显示的消息数量'),
     // 添加图片存储路径配置
     imageStoragePath: Schema.string()
       .default('./data/chat_archive_images')
-      .description('图片本地化存储路径（相对或绝对路径），当给定的路径有误时使用默认路径'),
+      .description(`图片本地化存储路径（相对路径）\n修改其内容不会同步修改已经存储的图片的路径，所以请在使用插件前修改`),
   }).description('功能设置'),
 
   Permissions: Schema.object({
@@ -177,50 +177,6 @@ function fMulMessages(records: msg[], pageNum: number, totalPages: number, total
 }
 
 
-// 图片本地化下载函数
-// Coded fully by Deepseek
-async function localizeImg(http, imageUrl, fileName, config) {
-  const fs = require('fs').promises;
-  const path = require('path');
-
-  // 从配置中获取存储路径，如果没有配置则使用默认路径
-  const storageDir = path.resolve(
-    process.cwd(), 
-    config.Settings.imageStoragePath || './data/chat_archive_images'
-  );
-
-  try {
-    await fs.access(storageDir);
-  } catch {
-    await fs.mkdir(storageDir, { recursive: true });
-  }
-
-  // 生成本地文件路径
-  const localFilePath = path.join(storageDir, fileName);
-
-  try {
-    const response = await http.get(imageUrl, {
-      responseType: 'stream'
-    });
-
-    const writer = require('fs').createWriteStream(localFilePath);
-    response.pipe(writer);
-
-    await new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-      response.on('error', reject);
-    });
-
-    return localFilePath;
-
-  } catch (error) {
-    console.error('localizeImg 下载图片失败:', error);
-    throw new Error(`localizeImg 无法下载图片: ${imageUrl}`);
-  }
-}
-
-
 export function apply(ctx: Context, config: Config) {
   ctx.model.extend('chat_archive', {
     id: 'unsigned',
@@ -270,7 +226,7 @@ export function apply(ctx: Context, config: Config) {
 
       const user = quotedMsg.user
       if (!user) {
-        return '无法获取群u信息...?'
+        return '无法获取群用户信息...?'
       }
 
       let finalTag = ''
@@ -281,7 +237,6 @@ export function apply(ctx: Context, config: Config) {
       }
 
       // Tag 不能完全与引用文本一致
-      // 原因未知
       if (finalTag === session.quote?.content) {
         finalTag = '';
       }
@@ -296,38 +251,104 @@ export function apply(ctx: Context, config: Config) {
         }
       }
 
-      // Subfoo: 处理图片链接并转化为本地保存
-      // Coding with GPT-5 && Deepseek
-      let rawContent = quotedMsg.content;
-
-      // 检查内容中是否包含图片
-      // One target example: <img src="https://multimedia.nt.qq.com.cn/download..." summary="[动画表情]" file="123.png" sub-type="1" file-size="12345"/>
-      const imgRegex = /<img[^>]+src="([^"]+)"[^>]*file="([^"]+)"[^>]*>/g;
-      let imgMatch;
-      const imgMatches = [];
-
-      // imgMatch[1],[2] 分别进行拆分
-      while ((imgMatch = imgRegex.exec(rawContent)) !== null) {
-        imgMatches.push({
-          fullMatch: imgMatch[0],
-          src: imgMatch[1],
-          fileName: imgMatch[2]
-        });
+      // 提取图片URL
+      const extractImageUrls = (content) => {
+        const urls = []
+        const imgElements = h.select(content, 'img')
+        for (const img of imgElements) {
+          if (img.attrs.src) {
+            urls.push({
+              fullMatch: h('img', img.attrs).toString(),
+              src: img.attrs.src,
+              fileName: img.attrs.file || `image_${Date.now()}`
+            })
+          }
+        }
+        return urls
       }
 
-      // 如果有图片，下载并替换为本地路径
+      // 下载图片并保存到本地（使用相对路径）
+      const downloadAndSaveImage = async (http, imageUrl, fileName, config) => {
+        const fs = require('fs').promises
+        const path = require('path')
+
+        // 存储目录（相对路径）
+        const storageDir = config?.Settings?.imageStoragePath || 'data/chat_archive_images'
+        await fs.mkdir(storageDir, { recursive: true }).catch(() => { })
+
+        // 替换文件名特殊字符为下划线
+        let safeFileName = (fileName || 'image_' + Date.now()).replace(/[\\/:*?"<>|]/g, '_')
+
+        try {
+          const file = await http.file(imageUrl)
+          if (!file || !file.data) {
+            throw new Error('无法获取图片数据')
+          }
+
+          // 自动识别扩展名
+          let extension = '.png'
+          if (file.type === 'image/jpeg' || file.mime === 'image/jpeg') {
+            extension = '.jpg'
+          } else if (file.type === 'image/png' || file.mime === 'image/png') {
+            extension = '.png'
+          } else if (file.type === 'image/gif' || file.mime === 'image/gif') {
+            extension = '.gif'
+          } else if (file.type === 'image/webp' || file.mime === 'image/webp') {
+            extension = '.webp'
+          }
+
+          if (!path.extname(safeFileName)) {
+            safeFileName += extension
+          }
+
+          const filePath = path.join(storageDir, safeFileName)
+
+          // 处理重名
+          let actualFilePath = filePath
+          let counter = 1
+          while (true) {
+            try {
+              await fs.access(actualFilePath)
+              const ext = path.extname(filePath)
+              const name = path.basename(filePath, ext)
+              actualFilePath = path.join(storageDir, `${name}(${counter})${ext}`)
+              counter++
+            } catch {
+              break
+            }
+          }
+
+          // 写入文件
+          await fs.writeFile(actualFilePath, Buffer.from(file.data))
+
+          // 返回相对路径（统一用正斜杠）
+          return actualFilePath.replace(/\\/g, '/')
+        } catch (error) {
+          console.error('下载图片失败:', error)
+          throw new Error(`无法下载图片: ${imageUrl}`)
+        }
+      }
+
+      let rawContent = quotedMsg.content
+      const imgMatches = extractImageUrls(rawContent)
+
+      // 替换图片路径为相对路径
       if (imgMatches.length > 0) {
         for (const img of imgMatches) {
           try {
-
-            const localPath = await localizeImg(session.app.http, img.src, img.fileName, config);
+            const localPath = await downloadAndSaveImage(
+              session.app.http,
+              img.src,
+              img.fileName,
+              config
+            )
 
             rawContent = rawContent.replace(
               img.fullMatch,
-              `<img src="${localPath}" file="${img.fileName}" />`
-            );
+              `<img src="${localPath}" file="${path.basename(localPath)}" />`
+            )
           } catch (error) {
-            console.error(`下载图片失败: ${img.src}，使用QQ原始链接临时储存（原链接会在若干天内过期）`, error);
+            console.error(`下载图片失败: ${img.src}，使用原始链接`, error)
           }
         }
       }
@@ -338,11 +359,22 @@ export function apply(ctx: Context, config: Config) {
         groupId: session.guildId,
         senderId: user.id,
         senderName: senderName,
-        content: rawContent,    // not raw exactly
+        content: rawContent,
         timestamp: new Date(quotedMsg.timestamp || Date.now()),
       })
 
-      return `#${chat_archive.id} 消息已储存${finalTag ? `，Tag: ${finalTag}` : ''}`
+      // 不直接返回这句话是担心存储图片时会将全部内容存进Tag，而图片链接无法解析，导致输出报错
+      // ErrorCode 1200
+      const text = `#${chat_archive.id} 消息已储存${finalTag ? `，Tag: ${finalTag}` : ''}`
+
+      const oldQuote = session.quote
+      session.quote = null
+
+      try {
+        await session.send(h.text(text))
+      } finally {
+        session.quote = oldQuote
+      }
     })
 
 
